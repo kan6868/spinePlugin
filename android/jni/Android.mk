@@ -6,10 +6,10 @@
 LOCAL_PATH := $(call my-dir)
 
 ifeq ($(OS),Windows_NT)
-	CORONA_ROOT := C:\PROGRA~2\CORONA~1\Corona\Native
+    CORONA_ROOT := D:/Solar2D_normal/Native
 else
-	CORONA := /Applications/Corona-3721
-	CORONA_ROOT := $(CORONA)/Native
+    CORONA := /Applications/Corona-3721
+    CORONA_ROOT := $(CORONA)/Native
 endif
 
 LUA_API_DIR := $(CORONA_ROOT)/Corona/shared/include/lua
