@@ -247,6 +247,9 @@
     <ClCompile Include="..\shared\Lua_TrackEntry.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\shared\Lua_Skin.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\shared\SpineRenderer.h">
@@ -574,6 +577,9 @@
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="..\shared\SplitData.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\shared\Lua_Skin.h">
       <Filter>Source Files</Filter>
     </ClInclude>
   </ItemGroup>
