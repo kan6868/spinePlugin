@@ -27,9 +27,14 @@ public:
     const std::string &failure() const { return failedPath; }
     void clearFailure() { failedPath.clear(); }
 
+    // A registry reference to a Lua function(pagePath) -> texture that load() calls instead of graphics.newTexture,
+    // or LUA_NOREF. Set by spine.loadAtlas around new Atlas only; the caller owns the reference.
+    void setProvider(int ref) { providerRef = ref; }
+
 private:
     lua_State *L;
     std::unordered_map<std::string, TextureRef> textures;
     std::unordered_map<Texture*, std::string> textureToPath;
     std::string failedPath;
+    int providerRef = LUA_NOREF;
 };

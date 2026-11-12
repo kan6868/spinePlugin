@@ -7,6 +7,7 @@
 #include "LuaTableHolder.h"
 #include "CoronaLibrary.h"
 #include <cstring>
+#include <string>
 
 template class DataHolder<Atlas>;
 
@@ -80,7 +81,11 @@ static void warnPremultipliedAlpha(lua_State *L, Atlas *atlas, const char *path)
     }
 }
 
-// spine.loadAtlas(path)
+// spine.loadAtlas(path [, options])
+// options.data: the .atlas file's content as a string; the file is then not opened, path only names the directory
+// the page images are relative to. options.texture: function(pagePath) returning the page's texture (an object with
+// filename, baseDir and releaseSelf, like graphics.newTexture's), called instead of graphics.newTexture. Both let an
+// app keep its Spine files in a packed bundle instead of plain files.
 int loadAtlas(lua_State *L)
 {
     const char *shortPath = luaL_checkstring(L, 1);
@@ -89,26 +94,66 @@ int loadAtlas(lua_State *L)
     char *dir;
     int length;
     const char *data;
+    bool dataFromMemory = false;
+    int providerRef = LUA_NOREF;
 
-    pathForFile->pushTable(L);
-    lua_pushvalue(L, 1);
-    lua_call(L, 1, 1);
-
-    const char *absPath = lua_tostring(L, -1);
-    lua_pop(L, 1);
-
-    if (!absPath)
+    // Validate options before anything is allocated: luaL_error longjmps over C++ destructors.
+    if (!lua_isnoneornil(L, 2))
     {
-        luaL_error(L, "File not found: %s", shortPath);
-        return 0;
+        luaL_checktype(L, 2, LUA_TTABLE);
+        lua_getfield(L, 2, "data");
+        if (!lua_isnil(L, -1) && lua_type(L, -1) != LUA_TSTRING)
+            return luaL_error(L, "loadAtlas: options.data must be a string");
+        lua_getfield(L, 2, "texture");
+        if (!lua_isnil(L, -1) && !lua_isfunction(L, -1))
+            return luaL_error(L, "loadAtlas: options.texture must be a function");
+        lua_pop(L, 2);
     }
 
-    data = SpineExtension::readFile(absPath, &length);
-
-    if (!data)
+    if (!lua_isnoneornil(L, 2))
     {
-        luaL_error(L, "Failed to load atlas file: %s", absPath);
-        return 0;
+        lua_getfield(L, 2, "data");
+        if (lua_type(L, -1) == LUA_TSTRING)
+        {
+            size_t size;
+            data = lua_tolstring(L, -1, &size); // kept alive by options.data until this function returns
+            length = (int)size;
+            dataFromMemory = true;
+        }
+        lua_pop(L, 1);
+    }
+
+    if (!dataFromMemory)
+    {
+        pathForFile->pushTable(L);
+        lua_pushvalue(L, 1);
+        lua_call(L, 1, 1);
+
+        const char *absPath = lua_tostring(L, -1);
+        lua_pop(L, 1);
+
+        if (!absPath)
+        {
+            luaL_error(L, "File not found: %s", shortPath);
+            return 0;
+        }
+
+        data = SpineExtension::readFile(absPath, &length);
+
+        if (!data)
+        {
+            luaL_error(L, "Failed to load atlas file: %s", absPath);
+            return 0;
+        }
+    }
+
+    if (!lua_isnoneornil(L, 2))
+    {
+        lua_getfield(L, 2, "texture");
+        if (lua_isfunction(L, -1))
+            providerRef = luaL_ref(L, LUA_REGISTRYINDEX); // pops it
+        else
+            lua_pop(L, 1);
     }
 
     /* Get directory from atlas path. Allocated only here: nothing between this and its free raises. */
@@ -122,9 +167,13 @@ int loadAtlas(lua_State *L)
     memcpy(dir, shortPath, dirLength);
     dir[dirLength] = '\0';
 
+    textureLoader->setProvider(providerRef);
     Atlas *atlas = new Atlas(data, length, dir, textureLoader, true);
+    textureLoader->setProvider(LUA_NOREF);
+    luaL_unref(L, LUA_REGISTRYINDEX, providerRef); // no-op for LUA_NOREF
 
-    SpineExtension::free(data, __FILE__, __LINE__);
+    if (!dataFromMemory)
+        SpineExtension::free(data, __FILE__, __LINE__);
     SpineExtension::free(dir, __FILE__, __LINE__);
 
     if (!textureLoader->failure().empty())
@@ -143,13 +192,37 @@ int loadAtlas(lua_State *L)
     return 1;
 }
 
+// The source readSkeletonData reads: a file, or bytes already in memory (spine.loadSkeletonData's data argument).
+struct SkeletonSource
+{
+    const char *path; // the absolute path, or the short path naming the data in messages
+    const char *bytes; // NULL: read the file at path
+    size_t length;
+};
+
+static SkeletonData *readFrom(SkeletonJson *json, const SkeletonSource &src)
+{
+    if (!src.bytes)
+        return json->readSkeletonDataFile(src.path);
+    std::string text(src.bytes, src.length); // NUL-terminated copy: the Lua string may hold embedded zeros
+    return json->readSkeletonData(text.c_str());
+}
+
+static SkeletonData *readFrom(SkeletonBinary *binary, const SkeletonSource &src)
+{
+    if (!src.bytes)
+        return binary->readSkeletonDataFile(src.path);
+    return binary->readSkeletonData((const unsigned char *)src.bytes, (int)src.length);
+}
+
 // Reads with a heap reader and deletes it. On failure pushes the error message, with the reader's reason when it
 // recorded one, while the reader is still alive: the caller raises after it is gone.
 template <typename Reader>
-static SkeletonData *readSkeletonData(lua_State *L, Reader *reader, float scale, const char *absPath)
+static SkeletonData *readSkeletonData(lua_State *L, Reader *reader, float scale, const SkeletonSource &src)
 {
+    const char *absPath = src.path;
     reader->setScale(scale);
-    SkeletonData *skeletonData = reader->readSkeletonDataFile(absPath);
+    SkeletonData *skeletonData = readFrom(reader, src);
     if (!skeletonData)
     {
         lua_pushfstring(L, "Failed to load skeleton data: %s", absPath);
@@ -163,25 +236,37 @@ static SkeletonData *readSkeletonData(lua_State *L, Reader *reader, float scale,
     return skeletonData;
 }
 
-// spine.loadSkeletonData(path, atlas[, scale])
+// spine.loadSkeletonData(path, atlas[, scale[, data]])
+// data: the .json or .skel file's content as a string; the file is then not opened. The format comes from path's
+// extension (.json / .skel), else from the content (JSON starts with '{').
 int loadSkeletonData(lua_State *L)
 {
     // assert path is a string
     const char *shortPath = luaL_checkstring(L, 1);
     float scale = luaL_optnumber(L, 3, 1.0f);
 
-    pathForFile->pushTable(L);
-    lua_pushvalue(L, 1);
-    lua_call(L, 1, 1);
-
-    const char *absPath = lua_tostring(L, -1);
-    lua_pop(L, 1);
-
-    if (!absPath)
+    SkeletonSource src = {NULL, NULL, 0};
+    if (!lua_isnoneornil(L, 4))
     {
-        luaL_error(L, "File not found: %s", shortPath);
-        return 0;
+        luaL_checktype(L, 4, LUA_TSTRING);
+        src.bytes = lua_tolstring(L, 4, &src.length); // kept alive by argument 4 until this function returns
+        src.path = shortPath;
     }
+    else
+    {
+        pathForFile->pushTable(L);
+        lua_pushvalue(L, 1);
+        lua_call(L, 1, 1);
+
+        src.path = lua_tostring(L, -1); // left on the stack: keeps the string alive while it is used
+
+        if (!src.path)
+        {
+            luaL_error(L, "File not found: %s", shortPath);
+            return 0;
+        }
+    }
+    const char *absPath = src.path;
 
     // No shared_ptr local: luaL_error below longjmps over C++ destructors. The userdata at 2 keeps the holder alive.
     DataHolder<Atlas> *atlasHolder = DataHolder<Atlas>::check(L, 2).get();
@@ -193,11 +278,22 @@ int loadSkeletonData(lua_State *L)
 
     Atlas *atlas = atlasHolder->getObject();
 
+    bool isJson = strstr(absPath, ".json") != NULL;
+    bool isBinary = !isJson && strstr(absPath, ".skel") != NULL;
+    if (!isJson && !isBinary && src.bytes)
+    {
+        size_t i = 0;
+        while (i < src.length && (src.bytes[i] == ' ' || src.bytes[i] == '\t' || src.bytes[i] == '\r' || src.bytes[i] == '\n'))
+            i++;
+        isJson = i < src.length && src.bytes[i] == '{';
+        isBinary = !isJson;
+    }
+
     SkeletonData *skeletonData;
-    if (strstr(absPath, ".json"))
-        skeletonData = readSkeletonData(L, spc::newJson(atlas), scale, absPath);
-    else if (strstr(absPath, ".skel"))
-        skeletonData = readSkeletonData(L, spc::newBinary(atlas), scale, absPath);
+    if (isJson)
+        skeletonData = readSkeletonData(L, spc::newJson(atlas), scale, src);
+    else if (isBinary)
+        skeletonData = readSkeletonData(L, spc::newBinary(atlas), scale, src);
     else
         return luaL_error(L, "Failed to load skeleton data: %s", absPath);
 
@@ -371,6 +467,12 @@ CORONA_EXPORT int SPINE_PLUGIN_LUAOPEN(lua_State *L) {
     lua_setfield(L, -2, "version");
     lua_pushstring(L, SPINE_VERSION_STRING);
     lua_setfield(L, -2, "runtimeVersion");
+    // What this build supports beyond the documented API. memory: loadAtlas(path, {data, texture}) and
+    // loadSkeletonData(path, atlas, scale, data) read Spine files from strings instead of the file system.
+    lua_createtable(L, 0, 1);
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "memory");
+    lua_setfield(L, -2, "features");
 
     textureLoader = new SpineTextureLoader(L);
     loadGroupReferences(L);

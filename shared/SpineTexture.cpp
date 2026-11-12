@@ -30,14 +30,23 @@ void SpineTextureLoader::load(spine::AtlasPage &page, const spine::String &path)
     }
     else
     {
-        newTexture->pushTable(L);
+        if (providerRef != LUA_NOREF)
+        {
+            // spine.loadAtlas's options.texture(pagePath)
+            lua_rawgeti(L, LUA_REGISTRYINDEX, providerRef);
+            lua_pushstring(L, shortPath.c_str());
+        }
+        else
+        {
+            newTexture->pushTable(L);
 
-        lua_createtable(L, 0, 3);
-        lua_pushstring(L, "image");
-        lua_setfield(L, -2, "type");
+            lua_createtable(L, 0, 3);
+            lua_pushstring(L, "image");
+            lua_setfield(L, -2, "type");
 
-        lua_pushstring(L, shortPath.c_str());
-        lua_setfield(L, -2, "filename");
+            lua_pushstring(L, shortPath.c_str());
+            lua_setfield(L, -2, "filename");
+        }
 
         // Record the failure and leave page.texture null: a raise here would longjmp out of new Atlas and leak it.
         int status = lua_pcall(L, 1, 1, 0);
